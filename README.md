@@ -1,2 +1,2 @@
 # Data-Science-project
-Misinformation Detection on Social Media project as a part of the ECON4170 subject.
+Misinformation Detection on Social Media with machine learning project as a part of the ECON4170 subject.
