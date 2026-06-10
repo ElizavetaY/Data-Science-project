@@ -1,0 +1,1255 @@
+---
+title: "Data Science project - Gen AI misinformation Detection Data"
+output: html_notebook
+---
+
+# STEP 1 - INITIAL SETUP
+
+```{r}
+# Install all necessary packages
+# install.packages(c("tidyverse", "readr", "ggplot2","maps", "tidymodels",  "purrr", "patchwork", "scales", "magrittr", "pheatmap", "treemapify", "knitr","recipes", "yardstick"))
+
+# Load all necessary packages
+library(readr)
+library(tidyverse)
+library(ggplot2)
+# library(scales) # for percentages
+library(dplyr)
+library(maps) # for geographical representation
+library(tidymodels) # for ML
+library(pheatmap) # for correlation matrix
+library(lubridate)
+library(parsnip) # for ML
+library(skimr)
+library(treemapify)
+library(knitr) # for exporting tables
+library(yardstick)
+library(recipes)
+
+
+# load the data set 
+generative_ai_misinformation_dataset <- read_csv("~/Desktop/ECON4170 Data Science for Economists /generative_ai_misinformation_dataset.csv")
+
+```
+
+# defining theme colors for a unified interface
+
+```{r}
+# define color palettes
+misinfo_colors <- c("0" = "#2ECC71", "1" = "#E74C3C")
+
+# using the official color codes for a more intuitive visualization
+platform_colors <- c("Facebook" = "#3b5998", "Twitter" = "#1DA1F2","Reddit" = "#FF4500", "Telegram" = "#0088cc")
+
+```
+
+# STEP 2 - DATA CLEANING / TIDY DATA
+
+```{r}
+df <- generative_ai_misinformation_dataset
+
+view(df) #open the entire dataset in a separate window
+glimpse(df) # using glimpse to check the if R managed to decode variable types right 
+tibble(df)
+summary(df)
+skimr::skim(df) # investigating missing values
+skim(df)
+
+# removing unnecessary variables
+df <- df %>%
+  select(-c(text, timezone, post_id, id, author_id))
+
+# converting categorical data with as.factor
+df <- df %>%
+  mutate(
+    # convert temporal data
+    timestamp = as.POSIXct(timestamp),
+    date = as.Date(date), # or: as_date
+    # convert other categorical data to factorial # obs across(where(is.character), as.factor) cannot be used here
+    is_misinformation = as.factor(is_misinformation),
+    platform = as.factor(platform),
+    author_verified = as.factor(author_verified),
+    model_signature = as.factor(model_signature),
+    factcheck_verdict = as.factor(factcheck_verdict),
+    country = as.factor(country),
+    city = as.factor(city),
+    weekday = as.factor(weekday),
+    month = as.factor(month),
+    # extracting time components from the timestamp
+    hour = hour(timestamp),
+    day_of_week = wday(timestamp, label = TRUE),
+    month_num = month(timestamp),
+    year = year(timestamp)
+  )
+
+# after extracting components from the data frame, we no longer need time stamp
+df$timestamp <- NULL
+
+# checking if all necessary variables are converted right
+glimpse(df)
+
+```
+
+# STEP 3 - DATA WRANGLING
+
+# 3.1 General misinforamtion distribution
+
+```{r}
+# version 1 - barplot
+
+misinformation_distribution <- df %>%
+  count(is_misinformation) %>%
+  mutate(percentage = n / sum(n)) %>%
+  ggplot(aes(x = is_misinformation, y = n, fill = is_misinformation)) +
+  geom_col() +
+  # printing percentages over bars
+  geom_text(aes(label = sprintf("%.1f%%", percentage * 100)), 
+            # bringing the percentage labels up from the bars (otherwise number merge with the bars)
+            vjust = -0.5) +
+  # incorporating unified colors
+  scale_fill_manual(values = misinfo_colors, labels = c("0" = "Authentic","1" = "Misinformation")) +
+  labs(title = "Misinformation Distribution", subtitle = "Across the Dataset", x = "Is Misinformation", y = "Posts") +
+  theme_minimal() + 
+  # adjusting the style of the titles
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5))
+
+print(misinformation_distribution)
+
+```
+
+```{r}
+# version 2 - pie chart  
+
+misinformation_pie <- df %>%
+  count(is_misinformation) %>%
+  mutate(
+    percentage = n / sum(n),
+    label = paste0(labels = c("Authentic", "Misinformation")[as.numeric(is_misinformation)+1], "\n", scales::percent(percentage, accuracy = 0.1))) %>%
+  ggplot(aes(x = "", y = percentage, fill = is_misinformation)) +
+  geom_col(color = "white", width = 1) + # slices
+  coord_polar(theta = "y") + # converting to pie
+  scale_fill_manual(values = misinfo_colors, labels = c("0" = "Authentic", "1" = "Misinformation")) +
+  labs(title = "Misinformation distribution", fill = "Classification") +
+  theme_void() +
+  # theme(legend.position = "bottom", plot.title = element_text(hjust = 0.5, face = "bold", size = 16)) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 16)) +
+  # labeling slices
+  geom_text(
+    aes(label = scales::percent(percentage, accuracy = 0.1)),
+    position = position_stack(vjust = 0.5),
+    color = "white",
+    fontface = "bold",
+    size = 5)
+
+misinformation_pie
+```
+
+# 3.2 Per platform (significant)
+
+```{r}
+misinfo_per_platform <- df %>%
+  group_by(platform) %>%
+  summarise(
+    total_posts   = n(),
+    misinfo_posts = sum(is_misinformation == "1"),
+    misinfo_index = misinfo_posts / total_posts)
+
+print(misinfo_per_platform)
+```
+
+```{r}
+posts_per_platform_bar <- df %>%
+  count(platform, sort = TRUE) %>% #sort the platform by posts (big->small)
+  #visuals
+  ggplot(aes(x = reorder(platform, n), y = n, fill = platform)) +
+  geom_col() +
+  coord_flip() + # flip bars horizontally
+  scale_fill_manual(values = platform_colors) +
+  labs(title = "Posts by platform", subtitle = "Barplot representation", x = NULL, y = "Number of Posts", fill = "Platform") +
+  # theme_minimal() +
+  theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5),) + # adjusting the header
+  theme(
+    plot.title    = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5),
+    legend.position = "bottom")
+
+print(posts_per_platform_bar)
+
+```
+
+```{r}
+# obs changed from treemap tp treemapify 
+
+posts_per_platform_treemap <- df %>%
+  count(platform, sort = TRUE) %>%       # platform + post counts
+  ggplot(aes(area  = n, fill  = platform, label = paste0(platform, "\n", n))) +   # "label" puts text inside tiles
+  geom_treemap(color = "white") +        # white borders like gallery
+  geom_treemap_text(place = "centre", colour = "white") +
+  scale_fill_manual(values = platform_colors) +
+  labs(title = "Posts per platform", fill = "Platform") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5),
+    legend.position = "bottom")
+
+posts_per_platform_treemap
+```
+
+```{r}
+  
+# misinformation per platform without percentages
+
+misinfo_per_platform_visual <- df %>%
+  group_by(platform, is_misinformation) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  ggplot(aes(x = platform, y = n, fill = is_misinformation)) +
+  geom_col(position = "fill") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_fill_manual(values = misinfo_colors,
+                    labels = c("0" = "Authentic", "1" = "Misinformation")) +
+  labs(title = "Misinformation per platform", fill = "Classification", x = "Platform", y = "Percentage") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5), legend.position = "bottom") +
+  # labeling bars
+  geom_text(
+    aes(label = scales::percent(percentage, accuracy = 0.1)),
+    position = position_stack(vjust = 0.5),
+    color = "white",
+    fontface = "bold",
+    size = 5)
+
+# with percentages
+misinfo_per_platform_visual <- df %>%
+  group_by(platform, is_misinformation) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(platform) %>% 
+  # step 1 - compute share per platform
+  mutate(percentage = n / sum(n)) %>%
+  ggplot(aes(x = platform, y = percentage, fill = is_misinformation)) +
+  geom_col(position = "stack") +
+  # step 2 - percentage texts
+  geom_text(
+    aes(label = scales::percent(percentage, accuracy = 0.1)),
+    position = position_stack(vjust = 0.5),
+    color = "white",
+    fontface = "bold",
+    size = 4) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_fill_manual(values = misinfo_colors, labels = c("0" = "Authentic", "1" = "Misinformation")) +
+  labs(title = "Misinformation per platform", x = "Platform", y = "Share", fill = "Classification") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5), legend.position = "bottom")
+
+print(misinfo_per_platform_visual)
+
+```
+
+# 3.3 - Temporal Patterns
+
+# 3.3.1 - by hour
+
+# Per hour - significant
+
+```{r}
+misinfo_per_hour <- df %>%
+  group_by(hour) %>%
+  summarise(misinfo_share = sum(is_misinformation == "1") / n()*100)
+
+# print inside the project
+print(misinfo_per_hour)
+
+# print out for report
+misinfo_per_hour %>%
+  mutate(misinfo_share = round(misinfo_share, 1)) %>%
+  knitr::kable(
+    col.names = c("Hour of the day", "Misinformation share (%)"),
+    caption   = "Misinformation share per hour")
+
+```
+
+```{r}
+misinfo_per_hour_visual <- df %>%
+  group_by(hour, is_misinformation) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  
+  # creating a visual
+  ggplot(aes(x = hour, y = n, fill = is_misinformation)) +
+  geom_col(position = "fill") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_fill_manual(values = misinfo_colors, labels = c("0" = "0 - Authentic", "1" = "1 - Misinformation")) +
+  labs(title = "Misinformation share by time of the day", fill = "Classification", x = "Time of the day (hour)", y = "Percentage") +
+  theme_minimal() +
+  theme(
+    plot.title  = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.text.x = element_text(angle = 0, hjust = 1))
+
+print(misinfo_per_hour_visual)
+
+```
+
+```{r}
+# circular barplot representation (only misinformation)
+
+# choosing only misinformation and summarising by hourly misinformation share
+misinfo_share_hour <- df %>%
+  group_by(hour) %>%
+  summarise(
+    misinfo_posts = sum(is_misinformation == "1"),
+    total_posts = n(),
+    misinfo_share = misinfo_posts / total_posts)
+
+# visual as suggested by r-graph-gallery.com
+misinfo_per_hour_circular <- misinfo_share_hour %>%
+  ggplot(aes(x = factor(hour), y = misinfo_share)) +
+  geom_col(fill = misinfo_colors["1"], color = "white", width = 1) +
+  coord_polar(start = -pi/23) + # rotate to start at top
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(title = "Misinformation share by time of the day", x = NULL, y = NULL) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 11, hjust = 0.5),
+    axis.text.x = element_text(size = 10, face = "bold")
+  )
+
+print(misinfo_per_hour_circular)
+
+```
+
+# 3.3.2 - by weekday
+
+```{r}
+misinfo_per_weekday <- df %>%
+  mutate(weekday = factor(
+      weekday,
+      levels = c("Monday", "Tuesday", "Wednesday","Thursday", "Friday", "Saturday", "Sunday"),
+      ordered = TRUE)) %>%
+  group_by(weekday) %>%
+  summarise(misinfo_share = sum(is_misinformation == "1") / n()*100)
+
+# print inside the project 
+print(misinfo_per_weekday)
+
+# print out for report
+misinfo_per_weekday %>%
+  mutate(misinfo_share = round(misinfo_share, 1)) %>%
+  knitr::kable(
+    col.names = c("Day of the week", "Misinformation share (%)"),
+    caption   = "Misinformation share weekday")
+```
+
+```{r}
+# VISUAL
+misinfo_per_weekday_visual <- df %>%
+  group_by(weekday, is_misinformation) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  
+  # we need to reorder weekdays 
+  mutate(
+    weekday = factor(
+      weekday,
+      levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"),
+      ordered = TRUE)) %>%
+  # creating a visual
+  ggplot(aes(x = weekday, y = n, fill = is_misinformation)) +
+  geom_col(position = "fill") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_fill_manual(
+    values = misinfo_colors,
+    labels = c("0" = "Authentic", "1" = "Misinformation")) +
+  labs(title = "Misinformation by the day of the week", fill = "Classification", x = "Day of the week", y = "Share") +
+  theme_minimal() +
+  theme(
+    plot.title  = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom"
+  )
+  
+
+print(misinfo_per_weekday_visual)
+```
+
+# 3.3.3 - By month (significant)
+
+```{r}
+# months <- unique(df$month)
+
+# obs - we have more observations for some months than for others => look only %-wise on misinformation (aggregate)
+misinfo_per_month <- df %>%
+  group_by(month) %>%
+  summarise(
+    total_posts   = n(),
+    misinfo_posts = sum(is_misinformation == "1"),
+    misinfo_index = misinfo_posts / total_posts)
+
+print(misinfo_per_month)
+
+```
+
+```{r}
+
+# VISUAL
+misinfo_per_month_visual <- df %>%
+  group_by(month, is_misinformation) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  # we need to reorder months 
+  mutate(
+    month = factor(
+      month,
+      levels = c("January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"),
+      ordered = TRUE)) %>%
+  # creating a visual
+  ggplot(aes(x = month, y = n, fill = is_misinformation)) +
+  geom_col(position = "fill") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_fill_manual(
+    values = misinfo_colors,
+    labels = c("0" = "Authentic", "1" = "Misinformation")
+  ) +
+  labs(title = "Misinformation per month", fill = "Classification", x = "Month", y = "Share") +
+  theme_minimal() +
+  theme(
+    plot.title  = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(misinfo_per_month_visual)
+
+# conclusion - some months there is way more misinformation than other - f.eks. only 41% in June but 65% in May
+
+```
+
+# 3.3.4 - Throughout time - more misinformation nowadays?
+
+```{r}
+
+# we want to create a new step - by month across the whole data frame
+df <- df %>%
+  mutate(month_year = floor_date(date, "month"))
+
+# grouping
+misinfo_with_time <- df %>%
+  group_by(month_year) %>%
+  summarise(total_posts = n(),
+    misinfo_posts = sum(is_misinformation == "1"),
+    misinfo_share = misinfo_posts / total_posts
+  )
+
+# plotting with ggplot
+ggplot(misinfo_with_time, aes(x = month_year)) +
+  # grey line - total posts 
+  geom_line(aes(y = total_posts, color = "Total posts"), size = 1.2) +
+  # red line 
+  geom_line(aes(y = misinfo_posts, color = "Misinformation posts"), size = 1.2) +
+  labs(title = "Total posts vs Misinformation posts", x = "Month", y = "Number of posts") +
+  scale_color_manual(values = c("Total posts" = "darkgrey", "Misinformation posts" = "red")) +
+  theme_minimal()+ 
+  theme(plot.title  = element_text(size = 16, face = "bold", hjust = 0.5))
+```
+
+# looking at the misinformation share over time (step = month)
+
+```{r}
+
+ggplot(misinfo_time, aes(x = month_year, y = misinfo_share)) +
+  geom_line(color = "red", size = 1) + # adding misinformation line
+  geom_point(color = "red", size = 2) + # point for each month
+  scale_y_continuous(labels = scales::percent_format()) + # scale = misinformation share
+  # make the step on x-axis more evident
+  scale_x_date(date_breaks = "1 month", date_labels = "%b %Y") +
+  labs(title = "Misinformation share over time", x = "Timeline", y = "Misinformation share (%)") +
+  theme_minimal() +
+  theme(plot.title  = element_text(size = 16, face = "bold", hjust = 0.5),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+# Compute misinformation share per month and platform
+misinfo_time_platform <- df %>%
+  group_by(month_year, platform) %>%
+  summarise(misinfo_share = mean(is_misinformation == "1"), .groups = "drop")  # share of misinfo
+
+# plotting
+ggplot(misinfo_time_platform, aes(x = month_year, y = misinfo_share, color = platform)) +
+  geom_smooth(se = FALSE, method = "loess", span = 0.2, size = 0.8) + # no SE, Locally Estimated Scatterplot Smoothing
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  # make the step on x-axis more evident
+  scale_x_date(date_breaks = "1 month", date_labels = "%b %Y") +
+  scale_color_manual(values = platform_colors) +
+  labs(title = "Misinformation over time per platform", x = "Time (montly)", y = "Misinformation share", color = "Platform") +
+  theme_minimal() +
+  theme(
+    plot.title  = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+# excluding Facebook
+
+```{r}
+# Compute misinformation share per month and platform
+misinfo_time_platform <- df %>%
+  filter(platform != "Facebook") %>%
+  group_by(month_year, platform) %>%
+  summarise(misinfo_share = mean(is_misinformation == "1"), .groups = "drop")  # share of misinfo
+
+# plotting
+ggplot(misinfo_time_platform, aes(x = month_year, y = misinfo_share, color = platform)) +
+  geom_smooth(se = FALSE, method = "loess", span = 0.2, size = 0.8) + # no SE, Locally Estimated Scatterplot Smoothing
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  # make the step on x-axis more evident
+  scale_x_date(date_breaks = "1 month", date_labels = "%b %Y") +
+  scale_color_manual(values = platform_colors) +
+  labs(title = "Misinformation over time per platform", x = "Time (montly)", y = "Misinformation share", color = "Platform") +
+  theme_minimal() +
+  theme(
+    plot.title  = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  geom_vline(xintercept = as.Date("2024-12-01"), color = "red",linetype = "dashed",linewidth = 1.0) 
+```
+
+# 3.4 Per model signature (insignificant)
+
+```{r}
+misinfo_per_model_signature <- df %>%
+  group_by(model_signature) %>%
+  summarise(total_posts   = n(), misinfo_posts = sum(is_misinformation == "1"), misinfo_index = misinfo_posts / total_posts)
+
+print(misinfo_per_model_signature)
+```
+
+```{r}
+
+misinfo_per_model_signature_visual <- df %>%
+  group_by(model_signature, is_misinformation) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(model_signature) %>% # step 1 in adding % 
+  mutate(percentage = n / sum(n)) %>% # step 2 in adding % 
+  ggplot(aes(x = model_signature, y = percentage, fill = is_misinformation)) +
+  geom_col(position = "stack") +
+  # step 3 in adding %
+  geom_text(
+    aes(label = scales::percent(percentage, accuracy = 0.1)),
+    position = position_stack(vjust = 0.5),
+    color = "white",
+    fontface = "bold",
+    size = 4) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_fill_manual(values = misinfo_colors,
+                    labels = c("0" = "Authentic",
+                               "1" = "Misinformation")) +
+  labs(title = "Misinformation by model signature", fill = "Classification", x = "Model Signature", y = "Percentage") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5), legend.position = "bottom") 
+
+print(misinfo_per_model_signature_visual)
+
+```
+
+# 3.5 - Geographical spread
+
+```{r}
+
+# loading maps of cities for the world map
+data("world.cities")
+  
+posts_by_city <- df %>%
+  group_by(country, city) %>%
+  summarise(
+    total_posts   = n(),
+    misinfo_posts = sum(is_misinformation == "1", na.rm = TRUE),
+    # misinfo_index = if_else(total_posts > 0, misinfo_posts / total_posts, 0),
+    misinfo_rate = mean(is_misinformation == "1") * 100, .groups = "drop")
+
+# connecting to city coordinates for plotting
+city_coordinates <- world.cities %>%
+  select(name, country.etc, lat, long)
+
+posts_city_geo <- posts_by_city %>%
+  left_join(city_coordinates, by = c("city" = "name", "country" = "country.etc"))
+
+ggplot() +
+  borders("world", colour = "grey80", fill = "grey95") +
+  geom_point(
+    data = posts_city_geo %>% filter(!is.na(lat), !is.na(long)),
+    aes(x = long, y = lat, size = total_posts, color = misinfo_rate), alpha = 0.7) + # alpha reduces opacity
+  scale_size_continuous(name = "Total posts") +
+  # adjusting colors
+  scale_color_gradient(low  = "green", high = "red", name = "Misinformation rate (%)") +
+  coord_fixed(1.3) + # elongate the picture vertically
+  theme_void() + #remove ticks
+  # adding labels
+  labs(title = "Geographical spread of misinformation", subtitle = "City-level epicenters") +
+  # adjusting the style of the titles
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5))
+
+# conclusion: we see a big difference here!
+```
+
+```{r}
+
+posts_by_cities_2 <- df %>%
+  group_by(city) %>%
+  summarise(posts = n(), misinfo_rate = mean(is_misinformation == "1") * 100) %>%
+  ggplot(aes(x = reorder(city, misinfo_rate), y = posts)) +
+  geom_point(aes(size = posts, color = misinfo_rate)) +
+  scale_color_gradient2(low = "green", mid = "yellow", high = "red",midpoint = 50) +
+  coord_flip() +
+  labs(title = "Post volume and misinformation in cities",x = "City", y = "Post volume") + 
+  theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5),)
+
+print(posts_by_cities_2)
+```
+
+# STEP 4 - CORRELATIONS IN OTHER FACTORS
+
+# Matrix
+
+```{r}
+matrix_variables <- df %>%
+select(is_misinformation,
+       toxicity_score,
+       sentiment_score,
+       detected_synthetic_score,
+       factcheck_verdict,
+       external_factchecks_count, 
+       source_domain_reliability,
+       embedding_sim_to_facts,
+       author_followers,
+       author_verified,
+       text_length,
+       token_count,
+       engagement)
+
+# converting categorical factors to numeric in  to use them in the matrix
+matrix_variables$is_misinformation <- as.numeric(as.character(matrix_variables$is_misinformation))
+matrix_variables$factcheck_verdict <- as.numeric(matrix_variables$factcheck_verdict)
+matrix_variables$author_verified <- as.numeric(matrix_variables$author_verified)
+
+corr_matrix <- cor(matrix_variables, use = "complete.obs")
+
+# creating a visualization
+pheatmap(corr_matrix,
+         display_numbers = TRUE,
+         number_format = "%.2f",
+         color = colorRampPalette(c("#E74C3C", "white", "#2ECC71"))(200),
+         main = "Correlation matrix")
+```
+
+# STEP 5 - MACHINE LEARNING
+
+# 5.0 Creating a data frame only with variables we want to use in this step
+
+```{r}
+ml_df <- df %>%
+  select(
+    is_misinformation,
+    hour,
+    month_num,
+    platform,
+    city
+  )
+```
+
+# 5.1 Converting variables from factor to numerical
+
+```{r}
+# the features for testing should be numerical and is_misinformation a dummy
+ml_df <- ml_df %>%
+  mutate(across(where(is.character), as.factor), is_misinformation = as.factor(is_misinformation))
+```
+
+# 5.2 Splitting the data
+
+```{r}
+set.seed(3170)
+split <- initial_split(ml_df, prop = 0.8, strata = is_misinformation)
+test <- testing(split)
+train <- training(split)
+
+# checking the means of misinformation share across the test and train samples 
+# need to convert to numeric to get a number (otherwise - NA)
+mean_train <- mean(as.numeric(as.character(train$is_misinformation)))
+mean_test  <- mean(as.numeric(as.character(test$is_misinformation)))
+
+mean_train # 0.5363
+mean_test # 0.5346
+```
+
+# 5.3 Building recipes
+
+```{r}
+
+rec <- recipe(is_misinformation ~., data = train) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_zv(all_predictors())
+```
+
+# 5.4 Choosing models
+
+```{r}
+
+# Logistic
+log_spec <- logistic_reg() |>
+  set_engine("glm") 
+
+# Random forest
+rforest_spec <- rand_forest() |>
+  set_engine("ranger") |>
+  set_mode("classification") # change from: regression
+
+# Gradient boosted tree
+xgboost_spec <- boost_tree() |>
+  set_engine("xgboost") |>
+  set_mode("classification")
+```
+
+# 5.3.1 - Training a logistic model
+
+```{r}
+# a
+log_fit <- log_spec |>
+  fit(is_misinformation ~ ., data = train)
+
+# using predict() to predict the outcomes in the test sample 
+log_pred <- predict(log_fit, test, type = "prob")
+
+  # get .pred_0 and .pred_1
+
+# b - converting the probabilities to predicted values
+log_pred <- log_pred |>
+  mutate(pred_class = as.factor(ifelse(.pred_1 >= 0.5, 1, 0)))
+
+# c - creating a confusion matrix 
+
+test_aug <- bind_cols(test, log_pred) |>
+  mutate(
+    truth = is_misinformation,
+    pred_class = factor(pred_class, levels = c(0, 1)))
+
+log_conf <- test_aug |>
+  conf_mat(truth = truth, estimate = pred_class)
+
+print(log_conf)
+
+# checking model accuracy using yardstick::accuracy()
+# The accuracy-function is basically doing:
+# (lm_conf[[1]][1] + lm_conf[[1]][4]) / nrow(monks_test)
+# I.e. the (true_neg + true_pos) / n_predictions
+lm_acc <- test_aug |> # Save it to compare with xgboost
+  accuracy(truth = is_misinformation, estimate = pred_class)
+
+lm_acc
+# 0.54 (1st try)
+# 0.45 (latest)
+
+
+```
+
+# Gradient boosting model (XGBoost)
+
+```{r}
+# a  - making a new data set
+ml_df2 <- ml_df |>
+  mutate(class = as.factor(is_misinformation))
+
+set.seed(4170)
+df2_split <- initial_split(ml_df2, prop = 0.8, strata = class)
+df2_test <- testing(df2_split)
+df2_train <- training(df2_split)
+
+
+# b - specifying and fitting the xgboost model
+xgboost_fit <- boost_tree() |>
+  set_mode("classification") |>
+  fit(is_misinformation ~ ., data = df2_train)
+
+
+# c - confusion matrix
+xgboost_pred <- predict(xgboost_fit, df2_test) |>
+  bind_cols(df2_test)
+
+xgboost_pred |>
+  conf_mat(truth = is_misinformation, estimate = .pred_class)
+
+# checking accuracy
+xgboost_pred |>
+  accuracy(truth = is_misinformation, estimate = .pred_class)
+```
+
+# Building a workflow
+
+```{r}
+wf <- workflow() %>%
+  add_recipe(rec)
+
+log_fit <- wf %>% add_model(log_spec) %>% fit(train)
+rforest_fit  <- wf %>% add_model(rforest_spec) %>% fit(train)
+xgboost_fit <- wf %>% add_model(xgboost_spec) %>% fit(train)
+
+
+```
+
+# 5.7 Evaluating each model
+
+```{r}
+# LOGISTIC
+log_pred <- predict(log_fit, test, type = "prob") %>%
+  bind_cols(test) %>%
+  mutate(
+    pred_class = as.factor(ifelse(.pred_1 >= 0.5, 1, 0)))
+
+log_conf <- log_pred %>%
+  conf_mat(truth = is_misinformation, estimate = pred_class)
+
+log_acc <- log_pred %>%
+  accuracy(truth = is_misinformation, estimate = pred_class)
+
+log_conf
+log_acc
+# 0.45
+
+# RFOREST
+pred_rforest <- predict(rforest_fit, test) %>%
+  bind_cols(test)
+
+conf_mat(pred_rforest, truth = is_misinformation, estimate = .pred_class)
+accuracy(pred_rforest, truth = is_misinformation, estimate = .pred_class)
+# 0.55
+
+
+#XBOOST
+pred_xgboost <- predict(xgboost_fit, test) %>%
+  bind_cols(test)
+
+conf_mat(pred_xgboost, truth = is_misinformation, estimate = .pred_class)
+accuracy(pred_xgboost, truth = is_misinformation, estimate = .pred_class)
+# 0.54
+
+
+
+```
+
+# STEP 6 - TUNING (introducing more variables and changing month to categorical)
+
+# 6.0 Choosing new variables for the data frame
+
+```{r}
+ml_df2 <- df %>%
+  select(
+    is_misinformation,
+    hour,
+    # month_num,
+    platform,
+    city,
+    # new
+    month,
+    sentiment_score,
+    token_count,
+    author_followers
+  )
+```
+
+# 6.1 Converting variables from factor to numerical
+
+```{r}
+# the features for testing should be numerical and is_misinformation a dummy
+ml_df2 <- ml_df2 %>%
+  mutate(
+    across(where(is.character), as.factor),
+    is_misinformation = as.factor(is_misinformation))
+```
+
+# 6.2 Splitting the data
+
+```{r}
+set.seed(3170)
+split2 <- initial_split(ml_df2, prop = 0.8, strata = is_misinformation)
+test2 <- testing(split2)
+train2 <- training(split2)
+
+# checking the means of misinformation share across the test and train samples 
+# need to convert to numeric to get a number (otherwise - NA)
+mean_train2 <- mean(as.numeric(as.character(train2$is_misinformation)))
+mean_test2  <- mean(as.numeric(as.character(test2$is_misinformation)))
+
+mean_train2 # 0.5363
+mean_test2 # 0.5346
+
+# note: mean stayed the same
+
+```
+
+# 6.3 Building recipes
+
+```{r}
+rec2 <- recipe(is_misinformation ~., data = train2) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_zv(all_predictors())
+```
+
+# 6.4 Model specification
+
+```{r}
+
+# Logistic
+log_spec2 <- logistic_reg() |>
+  set_engine("glm") |>
+  set_mode("classification")
+
+# Random forest
+rforest_spec2 <- rand_forest() |>
+  set_engine("ranger") |>
+  set_mode("classification") # change from: regression
+
+# Gradient boosted tree
+xgboost_spec2 <- boost_tree() |>
+  set_engine("xgboost") |>
+  set_mode("classification")
+```
+
+# 6.5 Building a workflow
+
+```{r}
+wf2 <- workflow() %>%
+  add_recipe(rec2)
+```
+
+# 6.6 Fitting the models
+
+```{r}
+log_fit2 <- wf2 %>% add_model(log_spec2) %>% fit(train2)
+rforest_fit2  <- wf2 %>% add_model(rforest_spec2) %>% fit(train2)
+xgboost_fit2 <- wf2 %>% add_model(xgboost_spec2) %>% fit(train2)
+
+```
+
+# 6.7 Evaluating the models
+
+```{r}
+
+# LOGISTIC
+log_pred2 <- predict(log_fit2, test2, type = "prob") %>%
+  bind_cols(test2) %>%
+  mutate(pred_class = as.factor(ifelse(.pred_1 >= 0.5, 1, 0)))
+
+log_conf2 <- log_pred2 %>%
+  conf_mat(truth = is_misinformation, estimate = pred_class)
+
+log_acc2 <- log_pred2 %>%
+  accuracy(truth = is_misinformation, estimate = pred_class)
+
+log_conf2 # view in the terminal 
+log_acc2
+# 0.61
+
+# RFOREST
+pred_rforest2 <- predict(rforest_fit2, test2) %>%
+  bind_cols(test2)
+
+conf_mat(pred_rforest2, truth = is_misinformation, estimate = .pred_class)
+accuracy(pred_rforest2, truth = is_misinformation, estimate = .pred_class)
+# 0.58
+
+
+#XBOOST
+pred_xgboost2 <- predict(xgboost_fit2, test2) %>%
+  bind_cols(test2)
+
+conf_mat(pred_xgboost2, truth = is_misinformation, estimate = .pred_class)
+accuracy(pred_xgboost2, truth = is_misinformation, estimate = .pred_class)
+# 0.57
+
+
+```
+
+# Confusion matrices
+
+```{r}
+# for log
+cm_log_tbl <- as.table(log_conf$table) %>%
+  as_tibble() %>%
+  rename(prediction = Prediction, truth = Truth, n = n) %>%
+  mutate(truth = as.factor(truth), prediction = as.factor(prediction))
+
+ggplot(cm_log_tbl, aes(x = truth, y = prediction, fill = n)) +
+  geom_tile(color = "white", linewidth = 1.2) +
+  geom_text(aes(label = n), color = "white", fontface = "bold", size = 6) +
+  scale_fill_gradient(low = "#d4e6f1", high = "#1f618d") +
+  labs(title = "Confusion matrix – Logistic regression", subtitle = "Without penalty", x = "True classification", y = "Predicted classification") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5), plot.subtitle = element_text(size = 12, hjust = 0.5), panel.grid = element_blank()) +
+  coord_fixed()
+
+
+```
+
+```{r}
+# for Rforest
+cm_rforest_tbl <- as.table(conf_mat(pred_rforest2, truth = is_misinformation, estimate = .pred_class)$table) %>%
+  as_tibble() %>%
+  rename(prediction = Prediction, truth = Truth, n = n) %>%
+  mutate(truth = as.factor(truth), prediction = as.factor(prediction))
+
+ggplot(cm_rforest_tbl, aes(x = truth, y = prediction, fill = n)) +
+  geom_tile(color = "white", linewidth = 1.2) +
+  geom_text(aes(label = n), color = "white", fontface = "bold", size = 6) +
+  scale_fill_gradient(low = "#d4e6f1", high = "#1f618d") +
+  labs(title = "Confusion matrix – Rforest", x = "True classification", y = "Predicted classification") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5), panel.grid = element_blank()) +
+  coord_fixed()
+
+```
+
+```{r}
+# for XGBoost
+cm_xgb_tbl <- as.table(conf_mat(pred_xgboost2, truth = is_misinformation, estimate = .pred_class)$table) %>%
+  as_tibble() %>%
+  rename(prediction = Prediction, truth = Truth, n = n) %>%
+  mutate(truth = as.factor(truth), prediction = as.factor(prediction))
+
+ggplot(cm_xgb_tbl, aes(x = truth, y = prediction, fill = n)) +
+  geom_tile(color = "white", linewidth = 1.2) +
+  geom_text(aes(label = n), color = "white", fontface = "bold", size = 6) +
+  scale_fill_gradient(low = "#d4e6f1", high = "#1f618d") +
+  labs(title = "Confusion matrix – XGBoost", x = "True classification", y = "Predicted classification") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5), panel.grid = element_blank()) +
+  coord_fixed()
+```
+
+# 6.8 Further evaluation of the models
+
+```{r}
+
+# introduce the evaluation metrics 
+misinfo_metrics <- metric_set(accuracy, precision, recall, f_meas) #f-score = f_meas
+
+# COMPUTE METRICS FOR EACH MODEL 
+
+# (1) log
+metrics_log <- misinfo_metrics(
+  data = log_pred2,
+  truth = is_misinformation,
+  estimate = pred_class,
+  event_level = "second"    
+) |> 
+  mutate(model = "Logistic regression")
+
+# (2) rforest
+metrics_rf <- misinfo_metrics(
+  data = pred_rforest2,
+  truth = is_misinformation,
+  estimate = .pred_class,
+  event_level = "second"
+) |> 
+  mutate(model = "Random forest")
+
+#3 XGBoost
+metrics_xgb <- misinfo_metrics(
+  data = pred_xgboost2,
+  truth = is_misinformation,
+  estimate = .pred_class,
+  event_level = "second"
+) |> 
+  mutate(model = "XGBoost")
+
+# Table-view
+all_metrics <- bind_rows(metrics_log, metrics_rf, metrics_xgb)
+
+all_metrics
+```
+
+# visualize the metrics
+
+```{r}
+metrics_plot <- all_metrics |>
+  mutate(metric = recode(.metric,accuracy  = "Accuracy", precision = "Precision", recall = "Recall", f_meas = "F1-score")) |>
+  ggplot(aes(x = metric, y = .estimate, fill = model)) +
+  geom_col(position = "dodge") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0, 1)) +
+  labs(title = "Performance by model", x = NULL, y = "Score", fill = "Model") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5))
+
+metrics_plot
+
+```
+
+# STEP 7 - Tuning 2 - introducing penalties
+
+# 7.7 NEW - Evaluating the models
+
+```{r}
+# introducing a threshold that aims to penalize false positives (truthful signal when misinformation) more than false negatives (misinformation signal when truthful)
+threshold <- 0.45
+
+log_pred2_with_threshold <- predict(log_fit2, test2, type = "prob") %>%
+  bind_cols(test2) %>%
+  mutate(pred_class = as.factor(ifelse(.pred_1 >= threshold, 1, 0))) # adjusted
+
+log_conf2_with_threshold <- log_pred2_with_threshold %>%
+  conf_mat(truth = is_misinformation, estimate = pred_class)
+
+log_acc2_with_threshold <- log_pred2_with_threshold %>%
+  accuracy(truth = is_misinformation, estimate = pred_class)
+
+log_conf2_with_threshold
+log_acc2_with_threshold
+
+# without threshold => 0.61
+# threshold = 0.4 => 0.55
+# threshold = 0.45 => 0.56
+```
+
+```{r}
+# RFOREST + probabilities
+rforest_prob2 <- predict(rforest_fit2, test2, type = "prob") %>%
+  bind_cols(test2)
+
+# applying threshold
+rforest_pred_threshold <- rforest_prob2 %>%
+  mutate(pred_class_threshold = factor(ifelse(.pred_1 >= threshold, "1", "0"), levels = c("0", "1")))
+
+# confusion matrix
+rforest_cm_threshold <- rforest_pred_threshold %>%
+  conf_mat(truth = is_misinformation, estimate = pred_class_threshold)
+
+rforest_cm_threshold
+
+```
+
+# 7.8
+
+```{r}
+#XBOOST + probabilities
+xgboost_prob2 <- predict(xgboost_fit2, test2, type = "prob") %>%
+  bind_cols(test2)
+
+# + threshold
+xgboost_pred_threshold <- xgboost_prob2 %>%
+  mutate(pred_class_threshold = factor(ifelse(.pred_1 >= threshold, "1", "0"), levels = c("0", "1")))
+
+# confusion matrix
+xgboost_conf_threshold <- xgboost_pred_threshold %>%
+  conf_mat(truth = is_misinformation, estimate = pred_class_threshold)
+
+xgboost_conf_threshold
+```
+
+# confusion matrices
+
+```{r}
+# log + threshold
+cm_log_tbl <- as.table(log_conf2_with_threshold$table) %>%
+  as_tibble() %>%
+  rename(prediction = Prediction, truth = Truth, n = n) %>%
+  mutate(truth = as.factor(truth), prediction = as.factor(prediction))
+
+ggplot(cm_log_tbl, aes(x = truth, y = prediction, fill = n)) +
+  geom_tile(color = "white", linewidth = 1.2) +
+  geom_text(aes(label = n), color = "white", fontface = "bold", size = 6) +
+  scale_fill_gradient(low = "#d4e6f1", high = "#1f618d") +
+  labs(title = "Confusion matrix – Logistic regression*", subtitle = "*With penalty (0.45)", x = "True classification", y = "Predicted classification") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5), plot.subtitle = element_text(size = 12, hjust = 0.5), panel.grid = element_blank()) +
+  coord_fixed()
+
+```
+
+![]()
+
+```{r}
+# Rforest + threshold
+cm_rforest_with_threshold_tbl <- as.table(rforest_cm_threshold$table) %>%
+  as_tibble() %>%
+  rename(prediction = Prediction, truth = Truth, n = n) %>%
+  mutate(truth = as.factor(truth), prediction = as.factor(prediction))
+
+ggplot(cm_rforest_with_threshold_tbl, aes(x = truth, y = prediction, fill = n)) +
+  geom_tile(color = "white", linewidth = 1.2) +
+  geom_text(aes(label = n), color = "white", fontface = "bold", size = 6) +
+  scale_fill_gradient(low = "#d4e6f1", high = "#1f618d") +
+  labs(title = "Confusion matrix – Rforest*", subtitle = "*With penalty (0.45)", x = "True classification", y = "Predicted classification") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5), plot.subtitle = element_text(size = 12, hjust = 0.5), panel.grid = element_blank()) +
+  coord_fixed()
+
+```
+
+```{r}
+#  XGBoost + penalty
+cm_xgboost_with_threshold_tbl <- as.table(xgboost_conf_threshold$table) %>%
+  as_tibble() %>%
+  rename(prediction = Prediction, truth = Truth, n = n) %>%
+  mutate(truth = as.factor(truth), prediction = as.factor(prediction))
+
+ggplot(cm_xgboost_with_threshold_tbl, aes(x = truth, y = prediction, fill = n)) +
+  geom_tile(color = "white", linewidth = 1.2) +
+  geom_text(aes(label = n), color = "white", fontface = "bold", size = 6) +
+  scale_fill_gradient(low = "#d4e6f1", high = "#1f618d") +
+  labs(title = "Confusion matrix – XGBoost*", subtitle = "*With penalty (0.45)", x = "True classification", y = "Predicted classification") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5), plot.subtitle = element_text(size = 12, hjust = 0.5), panel.grid = element_blank()) +
+  coord_fixed()
+```
+
+# adjusting other metrics
+
+```{r}
+# log + threshold
+metrics_log <- misinfo_metrics(
+  data = log_pred2_with_threshold,
+  truth = is_misinformation,
+  estimate = pred_class,
+  event_level = "second"    
+) |>
+  mutate(model = "Logistic regression")
+
+# random forest + threshold
+metrics_rf <- misinfo_metrics(
+  data = rforest_pred_threshold,
+  truth = is_misinformation,
+  estimate = pred_class_threshold,  
+  event_level = "second"
+) |>
+  mutate(model = "Random forest")
+
+# XGBoost + threshold
+metrics_xgb <- misinfo_metrics(
+  data = xgboost_pred_threshold,
+  truth = is_misinformation,
+  estimate = pred_class_threshold,   
+  event_level = "second"
+) |>
+  mutate(model = "XGBoost")
+
+# combine all in one table
+all_metrics <- bind_rows(metrics_log, metrics_rf, metrics_xgb)
+
+all_metrics
+```
+
+# visualize the metrics
+
+```{r}
+metrics_plot <- all_metrics |>
+  mutate(metric = recode(.metric,accuracy  = "Accuracy", precision = "Precision", recall = "Recall", f_meas = "F1-score")) |>
+  ggplot(aes(x = metric, y = .estimate, fill = model)) +
+  geom_col(position = "dodge") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0, 1)) +
+  labs(title = "Performance by model*", subtitle = "*With penalty (0.45)", x = NULL, y = "Score", fill = "Model") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5), plot.subtitle = element_text(size = 12, hjust = 0.5))
+
+metrics_plot
+```
